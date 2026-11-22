@@ -77,6 +77,24 @@ def _parse_region(text: str):
     return ast.dump(ast.parse(text))
 
 
+def _only_strings(text: str) -> bool:
+    """True if text is nothing but bare string-literal statements (docstrings).
+    Their content is unobservable here: doctests are not collected by pytest
+    (tests/test_docs.py uses load_tests) and sqlglot never reads __doc__."""
+    wrapped = text[:1] in (" ", chr(9))
+    try:
+        body = ast.parse("if 1:" + NL + text if wrapped else text).body
+    except SyntaxError:
+        return False
+    if wrapped:
+        if len(body) != 1 or not isinstance(body[0], ast.If):
+            return False
+        body = body[0].body
+    return bool(body) and all(
+        isinstance(x, ast.Expr) and isinstance(x.value, ast.Constant)
+        and isinstance(x.value.value, str) for x in body)
+
+
 @dataclass
 class Result:
     tests: set = field(default_factory=set)
@@ -154,6 +172,8 @@ class Analyzer:
                 except SyntaxError:
                     broken = True
                     same = False
+            if not same and not broken and _only_strings(old_text) and _only_strings(new_text):
+                same = True  # edit confined to a docstring
             if not same:
                 semantic.append(b)
         return semantic, broken
@@ -228,13 +248,12 @@ class Analyzer:
         res.notes.append(f"code:{path}:{len(ts)}{':module' if module else ''}")
 
     def _importers(self, path):
-        if path in self.m.core:
-            return set(self.all_tests)
-        ts = set(self.m.opened.get(path, []))
-        for f in self.m.family.get(path, [path]):
-            if f in self.m.files:
-                ts.update(self.m.files[f]["mod_tests"])
-        return ts
+        # A module that no longer imports breaks every test file importing it
+        # at load time, and those imports happen during collection, outside any
+        # traced test (m1_052: optimizer/isolate_table_selects.py -> 1617
+        # failing, recorded importers covered 1529). Rare and expensive to get
+        # wrong: select everything.
+        return set(self.all_tests)
 
     def _test_py(self, path, fd, blocks, old, exists, res):
         m = self.m

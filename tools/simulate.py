@@ -40,6 +40,7 @@ policy.CLASS_COST.update(_mapdata.get("class_cost", {}))
 if _mapdata.get("session_cost"):
     policy.SESSION[0] = _mapdata["session_cost"]
 verbose = os.environ.get("V") == "1"
+policy.SPEED[0] = float(os.environ.get("SPEED", "1.3"))
 
 for d in sys.argv[1:]:
     ans = json.load(open(ROOT / d / "answers.json"))["commits"]
@@ -48,7 +49,9 @@ for d in sys.argv[1:]:
     for cid in sorted(ans):
         fail = set(ans[cid]["failing"])
         res = an.analyze((ROOT / d / "commits" / f"{cid}.patch").read_text(encoding="utf-8"))
-        p = policy.make_plan(res, sec, ms, known, m.test_file_of)
+        kinds = {n.split(":", 1)[0] for n in res.notes}
+        p = policy.make_plan(res, sec, ms, known, m.test_file_of, 1e9,
+                             bool(kinds) and kinds <= {"data", "noop"})
         c = p.est_s if p.check else 0.0
         chosen = policy.finish(p, p.check & fail)
         cost = pack(sorted(chosen), ms)[1] / 1000
