@@ -25,6 +25,7 @@ MAP = os.environ.get("BR_MAP", os.path.join(os.path.dirname(os.path.abspath(__fi
 PARALLEL = 2
 CPU_BUDGET_PER_COMMIT = 2.5  # seconds of test-running CPU per commit, batch-wide
 DEADLINE_S = float(os.environ.get("BR_DEADLINE", "150"))
+SPEED = 1.3  # assumed CPU seconds here per CPU second where costs were measured
 
 
 EMITTED: set = set()
@@ -76,6 +77,9 @@ def run(commits, tests) -> None:
     an = Analyzer(m, sorted(known))
 
     os.makedirs(verify.TMP, exist_ok=True)
+    # the board's machine is likely slower than the one costs were measured on;
+    # a startup benchmark proved too noisy to tell (1.65x on the reference box)
+    speed = policy.SPEED[0] = SPEED
     verify.preload()
 
     plans = []
@@ -94,7 +98,9 @@ def run(commits, tests) -> None:
             log(f"{cid}: analysis failed {e!r}; selecting everything")
             emit(cid, known)
             continue
-        p = policy.make_plan(res, sec, ms, known, m.test_file_of, budget_left)
+        kinds = {n.split(":", 1)[0] for n in res.notes}
+        data_only = bool(kinds) and kinds <= {"data", "noop"}
+        p = policy.make_plan(res, sec, ms, known, m.test_file_of, budget_left, data_only)
         budget_left -= p.est_s
         log(f"{cid}: blind={len(p.blind)} check={len(p.check)} gated={len(p.gated)} "
             f"{' '.join(res.notes)}")
@@ -117,9 +123,13 @@ def run(commits, tests) -> None:
                 continue
             ids = [m.test_file_of[t][1] for t in sorted(check)]
             left = DEADLINE_S + 15 - (time.monotonic() - t0)
-            # generous: failing tests run slower than passing ones (3utz: 2x est)
-            budget = max(3.0, min(10 + 6 * p.est_s, left))
-            job = verify.Job(cid, res.files, ids, budget)
+            # CPU cap: stop between tests once a run costs well over its estimate
+            # (failing tests can run far slower than passing ones: 3utz 3.8x);
+            # unfinished tests then count as failing
+            cap = 2.0 * p.est_s * speed + 0.8
+            # wall backstop for a single runaway test
+            budget = max(3.0, min((10 + 6 * p.est_s) * speed, left))
+            job = verify.Job(cid, res.files, ids, budget, cap)
             job.meta = (cid, p)
             running.append(job)
         if not running:

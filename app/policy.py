@@ -19,6 +19,9 @@ COST: dict = {}  # test -> measured marginal CPU seconds under our harness (from
 FILE_COST: dict = {}  # test file -> fixed CPU to collect/import it under our harness
 CLASS_COST: dict = {}  # "file::Class" -> setUpClass etc.
 SESSION: list = [VERIFY_OVERHEAD_S]  # per-job fixed CPU (pytest session + sqlglot import)
+# CPU seconds on this machine per CPU second on the machine the costs were
+# measured on (set at start from a short benchmark)
+SPEED: list = [1.0]
 
 
 def cost_s(t: int, sec: dict, file_of: dict) -> float:
@@ -52,7 +55,7 @@ class Plan:
 
 
 def make_plan(res, sec: dict, ms: dict, known: set, file_of: dict | None = None,
-              budget_left: float = 1e9) -> Plan:
+              budget_left: float = 1e9, data_only: bool = False) -> Plan:
     cand = res.tests & known
     file_of = file_of or {}
     giants = {t for t in cand if sec[t] >= GIANT_S or cost_s(t, sec, file_of) >= GIANT_S * 2}
@@ -74,7 +77,12 @@ def make_plan(res, sec: dict, ms: dict, known: set, file_of: dict | None = None,
     _, cost_blind = pack(sorted(cand), ms)
     _, cost_must = pack(sorted(must), ms)
     est_s = estimate(cheap, sec, file_of)
-    est = est_s * 1000
+    est = est_s * SPEED[0] * 1000
+    if data_only and (len(cheap) <= 3 or cost_blind <= 3500):
+        # an edited fixture almost always breaks the tests reading it: a short
+        # run would cost CPU only to confirm that
+        p.blind = cand
+        return p
     if est + cost_must >= cost_blind or est_s > MAX_VERIFY_S or est_s > budget_left:
         p.blind = cand  # running would cost more than selecting everything blind
         return p

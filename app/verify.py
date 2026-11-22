@@ -48,11 +48,17 @@ def build_overlay(dst: str, files: dict) -> None:
 
 
 class _Collector:
-    def __init__(self, wanted: set):
+    def __init__(self, wanted: set, cpu_cap: float = 1e9):
         self.wanted = wanted
         self.found: set = set()
         self.failed: set = set()
         self.bad_files: set = set()
+        self.done: set = set()  # tests whose teardown finished
+        self.cpu_cap = cpu_cap
+        self.session = None
+
+    def pytest_sessionstart(self, session):
+        self.session = session
 
     def pytest_collection_modifyitems(self, session, config, items):
         keep, drop = [], []
@@ -70,6 +76,18 @@ class _Collector:
     def pytest_runtest_logreport(self, report):
         if report.failed:
             self.failed.add(report.nodeid)
+        if report.when == "teardown":
+            self.done.add(report.nodeid)
+            if self.session is None:
+                return
+            # over budget: stop between tests; whatever did not run counts as failing
+            if time.process_time() > self.cpu_cap:
+                self.session.shouldstop = "cpu cap"
+            # nearly everything failing so far (a broad break): the rest would
+            # almost surely fail too, and failing tests are the slow ones
+            nf = len(self.failed & self.done)
+            if nf >= 5 and nf >= 0.8 * len(self.done):
+                self.session.shouldstop = "mostly failing"
 
 
 def _inline_pools() -> None:
@@ -122,7 +140,7 @@ def preload() -> None:
             pass
 
 
-def _child(job_dir: str, files: dict, wanted: list[str], out: str) -> None:
+def _child(job_dir: str, files: dict, wanted: list[str], out: str, cpu_cap: float) -> None:
     os.setsid()
     devnull = os.open(os.devnull, os.O_WRONLY)
     os.dup2(devnull, 1)
@@ -135,7 +153,7 @@ def _child(job_dir: str, files: dict, wanted: list[str], out: str) -> None:
     os.environ["PYTHONPATH"] = job_dir
     os.environ["SKIP_INTEGRATION"] = "0"
     _inline_pools()
-    col = _Collector(set(wanted))
+    col = _Collector(set(wanted), cpu_cap)
     test_files = sorted({w.split("::")[0] for w in wanted})
     rc = pytest.main(
         ["-q", "-p", "no:cacheprovider", "-o", "addopts=", "--no-header", "-W", "ignore",
@@ -150,7 +168,8 @@ def _child(job_dir: str, files: dict, wanted: list[str], out: str) -> None:
     failed = set(col.failed)
     for w in wanted:
         f = w.split("::")[0]
-        if w not in col.found or f in col.bad_files:
+        # not collected, not finished (cpu cap / interrupted), or its file broke
+        if w not in col.done or f in col.bad_files:
             failed.add(w)
     with open(out + ".part", "w") as fh:
         json.dump({"rc": int(rc), "failed": sorted(failed)}, fh)
@@ -158,7 +177,8 @@ def _child(job_dir: str, files: dict, wanted: list[str], out: str) -> None:
 
 
 class Job:
-    def __init__(self, key: str, files: dict, wanted: list[str], timeout: float):
+    def __init__(self, key: str, files: dict, wanted: list[str], timeout: float,
+                 cpu_cap: float = 1e9):
         self.key = key
         self.dir = os.path.join(TMP, key)
         self.out = os.path.join(TMP, key + ".json")
@@ -169,7 +189,7 @@ class Job:
         self.pid = os.fork()
         if self.pid == 0:
             try:
-                _child(self.dir, files, wanted, self.out)
+                _child(self.dir, files, wanted, self.out, cpu_cap)
             except BaseException as e:  # noqa
                 try:
                     with open(self.out + ".err", "w") as fh:
