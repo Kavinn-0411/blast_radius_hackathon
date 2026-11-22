@@ -19,7 +19,7 @@ RUN python -m compileall -q sqlglot tests \
  && chmod -R a+rX /opt/sqlglot
 
 COPY app /app
-RUN python -c "import json,pickle; pickle.dump(json.load(open('/app/map.json')), open('/app/map.pkl','wb'), protocol=5)" \
+RUN python /app/attrindex.py /app/map.json /opt/sqlglot /app/map.pkl \
  && rm /app/map.json && python -m compileall -q /app && chmod -R a+rX /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 SKIP_INTEGRATION=0

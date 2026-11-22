@@ -29,7 +29,11 @@ tests = json.load(open(ROOT / "sample/tests.json"))["tests"]
 ms = {t["number"]: round(t["seconds"] * 1000) for t in tests}
 sec = {t["number"]: t["seconds"] for t in tests}
 known = set(ms)
-m = Map(json.load(open(ROOT / "app/map.json")))
+_d = json.load(open(ROOT / "app/map.json"))
+if os.environ.get("ATTR", "1") == "1":
+    import attrindex  # noqa: E402
+    _d["attr_reads"], _d["attr_unsafe"] = attrindex.build(_d, str(ROOT / "work/sqlglot"))
+m = Map(_d)
 for t in tests:
     m.test_file_of[t["number"]] = (t["file"], t["id"])
 an = Analyzer(m, sorted(known))

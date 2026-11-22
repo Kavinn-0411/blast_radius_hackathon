@@ -16,6 +16,7 @@ class FileDiff:
     hunks: list[tuple[int, list[str]]] = field(default_factory=list)  # (old_start, raw lines)
 
 
+_UPPER = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -86,6 +87,8 @@ class Map:
         self._starts = {f: [u[0] for u in d["units"]] for f, d in self.files.items()}
         self._cstarts: dict = {}
         self.attr_xref = data.get("attr_xref", {})
+        self.attr_reads = data.get("attr_reads", {})  # NAME -> [(file, unit)] reading it
+        self.attr_unsafe = set(data.get("attr_unsafe", ()))
         self.class_users: dict = {}
         for d in self.files.values():
             for (_, _, key), users in zip(d.get("classes", ()), d.get("class_tests", ())):
@@ -152,7 +155,10 @@ class Map:
         if not users:
             return None
         out = set(users)
-        qual = self._class_key(path, ci).split(":", 1)[1].split(".")
+        readers = self._readers(names)
+        if readers is not None:
+            out &= readers  # users that also ran code reading the constant
+        qual =self._class_key(path, ci).split(":", 1)[1].split(".")
         for n in names:
             for key, chain in self.attr_xref.get(n, ()):
                 # body of `key` reads <chain>.n; keep it if chain can name this class
@@ -160,6 +166,20 @@ class Map:
                 k = min(len(c), len(qual))
                 if k and c[-k:] == qual[-k:]:
                     out.update(self.class_users.get(key, ()))
+        return out
+
+    def _readers(self, names) -> set[int] | None:
+        """Tests that ran a function reading any of these class-constant names,
+        or None when that cannot be told: not an UPPER_CASE constant, read at
+        import/class-creation time or by the tests themselves, or never read."""
+        if not names or not self.attr_reads:
+            return None
+        out: set[int] = set()
+        for n in names:
+            if not _UPPER.match(n) or n in self.attr_unsafe or n not in self.attr_reads:
+                return None
+            for path, u in self.attr_reads[n]:
+                out.update(self.files[path]["unit_tests"][u])
         return out
 
     def _class_key(self, path: str, ci: int) -> str:
