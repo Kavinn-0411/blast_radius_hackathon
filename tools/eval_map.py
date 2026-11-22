@@ -23,7 +23,7 @@ for cid in sorted(answers):
         path = fd.old or fd.new
         if path in m.files:
             lines = set(fd.removed) | {x for i in fd.inserted_at for x in (i - 1, i)}
-            ts, module = m.tests_for_lines(path, lines)
+            ts, module, _ = m.tests_for_lines(path, lines)
             cand |= ts
             if module:
                 notes.append("module:" + path.split("/")[-1])

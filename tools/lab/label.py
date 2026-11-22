@@ -13,12 +13,14 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-OUT, SLOTS, XW = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+OUT, SLOTS, PROCS = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 TESTS = json.load(open("/data/tests.json"))["tests"]
 BY_ID = {t["id"]: t["number"] for t in TESTS}
 BY_FILE: dict = {}
+FILE_SECS: dict = {}
 for t in TESTS:
     BY_FILE.setdefault(t["file"], []).append(t["number"])
+    FILE_SECS[t["file"]] = FILE_SECS.get(t["file"], 0) + t["seconds"]
 
 PLUGIN = '''
 import json, os
@@ -30,8 +32,6 @@ def pytest_collectreport(report):
     if report.failed:
         BADFILES.add(report.nodeid.split("::")[0])
 def pytest_sessionfinish(session, exitstatus):
-    if os.environ.get("PYTEST_XDIST_WORKER"):
-        return
     with open(os.environ["BR_LABEL_OUT"], "w") as fh:
         json.dump({"failed": sorted(FAILED), "bad": sorted(BADFILES), "rc": int(exitstatus)}, fh)
 '''
@@ -44,27 +44,44 @@ def label(cid: str, slot: int) -> dict:
         with open(f"{work}/br_label_plugin.py", "w") as fh:
             fh.write(PLUGIN)
     patch = os.path.join(OUT, "commits", cid + ".patch")
-    subprocess.run(["patch", "-p1", "-s", "-i", patch], cwd=work, check=True)
-    out = f"/tmp/label_{slot}.json"
+    if os.path.getsize(patch) == 0:  # base run (empty patch): nothing to apply
+        patch = None
+    if patch:
+        subprocess.run(["patch", "-p1", "-s", "-i", patch], cwd=work, check=True)
     try:
-        env = dict(os.environ, PYTHONPATH=work, BR_LABEL_OUT=out, SKIP_INTEGRATION="0")
-        subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "br_label_plugin",
-             "-n", XW, "--timeout", "300", "tests"],
-            cwd=work, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900,
-        )
-        r = json.load(open(out))
-        failing = {BY_ID[n] for n in r["failed"] if n in BY_ID}
-        for f in r["bad"]:
-            failing.update(BY_FILE.get(f, []))
-        # nodeids with a [param] or subtest suffix
-        for n in r["failed"]:
-            base = n.split("[")[0]
-            if base in BY_ID:
-                failing.add(BY_ID[base])
-        return {"failing": sorted(failing), "rc": r["rc"]}
+        # one fresh process per test file: no cross-file state, like a serial run
+        def run_file(f):
+            out = f"/tmp/label_{slot}_{f.replace('/', '_')}.json"
+            env = dict(os.environ, PYTHONPATH=work, BR_LABEL_OUT=out, SKIP_INTEGRATION="0")
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                     "-p", "br_label_plugin", "--timeout", "300", f],
+                    cwd=work, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=900,
+                )
+                r = json.load(open(out))
+                os.remove(out)
+            except Exception:
+                return set(BY_FILE[f]), -1  # crashed / hung: whole file fails
+            failing = set()
+            for n in r["failed"]:
+                base = n.split("[")[0]
+                if base in BY_ID:
+                    failing.add(BY_ID[base])
+            if r["bad"]:
+                failing.update(BY_FILE[f])
+            return failing, r["rc"]
+
+        failing, rcs = set(), []
+        with ThreadPoolExecutor(PROCS) as ex:
+            for fl, rc in ex.map(run_file, sorted(BY_FILE, key=lambda f: -FILE_SECS[f])):
+                failing |= fl
+                rcs.append(rc)
+        return {"failing": sorted(failing), "rc": max(rcs)}
     finally:
-        subprocess.run(["patch", "-p1", "-s", "-R", "-i", patch], cwd=work, check=True)
+        if patch:
+            subprocess.run(["patch", "-p1", "-s", "-R", "-i", patch], cwd=work, check=True)
 
 
 def main():

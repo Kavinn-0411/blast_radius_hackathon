@@ -15,6 +15,7 @@ import time
 
 SRC = os.environ.get("BR_SRC", "/opt/sqlglot")
 TMP = os.environ.get("BR_TMP", "/tmp/br")
+TEST_TIMEOUT_S = 15  # our cheap tests take <= ~1.5 s CPU each
 
 
 def build_overlay(dst: str, files: dict) -> None:
@@ -137,7 +138,12 @@ def _child(job_dir: str, files: dict, wanted: list[str], out: str) -> None:
     col = _Collector(set(wanted))
     test_files = sorted({w.split("::")[0] for w in wanted})
     rc = pytest.main(
-        ["-q", "-p", "no:cacheprovider", "-o", "addopts=", "--no-header", "-W", "ignore"]
+        ["-q", "-p", "no:cacheprovider", "-o", "addopts=", "--no-header", "-W", "ignore",
+         # pass/fail is all we need: formatting deep-recursion tracebacks for
+         # every failing subtest can cost tens of seconds
+         "--tb=no", "--show-capture=no", "-p", "no:logging",
+         # a hung test is a failing test (the labels count timeouts as failures)
+         "--timeout", str(TEST_TIMEOUT_S)]
         + test_files,
         plugins=[col],
     )
@@ -174,10 +180,13 @@ class Job:
                 os._exit(0)
         self.start = time.monotonic()
         self.result: set | None = None
+        self.cpu = -1.0
 
     def poll(self) -> bool:
         """True when finished (result set: failed nodeids, all wanted on error)."""
-        pid, _ = os.waitpid(self.pid, os.WNOHANG)
+        pid, _, ru = os.wait4(self.pid, os.WNOHANG)
+        if pid:
+            self.cpu = ru.ru_utime + ru.ru_stime
         if pid == 0:
             if time.monotonic() - self.start < self.timeout:
                 return False

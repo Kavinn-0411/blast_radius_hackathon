@@ -83,6 +83,7 @@ class Result:
     files: dict = field(default_factory=dict)  # path -> new text (None = deleted)
     notes: list = field(default_factory=list)
     import_break: list = field(default_factory=list)
+    groups: list = field(default_factory=list)  # evidence sets for giant tests
 
 
 class Analyzer:
@@ -111,9 +112,25 @@ class Analyzer:
                 lo, hi = b.lo - 1, b.lo
                 def holds(s, e, lo=lo, hi=hi):
                     return s <= lo and hi <= e
-            trivia = all(_is_trivia(x) for x in b.minus + b.plus) and not (
-                b.lo <= 3 and any(_COOKIE.match(x.encode()) for x in b.minus + b.plus)
-            )
+            trivia = all(_is_trivia(x) for x in b.minus + b.plus)
+            if trivia and b.lo <= 3 and any(_COOKIE.match(x.encode()) for x in b.minus + b.plus):
+                # an encoding declaration: bogus name -> import fails; a non-UTF-8
+                # codec on a non-ASCII file changes literals; ASCII file -> no-op
+                import codecs
+                for x in b.plus:
+                    mt = re.search(r"coding[:=]\s*([-\w.]+)", x)
+                    if not mt:
+                        continue
+                    try:
+                        name = codecs.lookup(mt.group(1)).name
+                    except LookupError:
+                        broken = True
+                        break
+                    if name != "utf-8" and any(ord(ch) > 127 for ln in old for ch in ln):
+                        trivia = False
+                if broken:
+                    semantic.append(b)
+                    continue
             if trivia and not any(holds(s, hdr) for s, hdr, _ in stmts):
                 continue  # comment/blank lines between statements (or inside a body)
             # smallest statement containing the whole edit -> parse old vs new
@@ -157,6 +174,8 @@ class Analyzer:
                 new_text = "\n".join(fd.plus)
             if fd.new is not None:
                 res.files[fd.new] = new_text
+            elif fd.old is not None:
+                res.files[fd.old] = None  # deletion: the overlay must not keep it
             if fd.old and fd.new and fd.old != fd.new:
                 res.files[fd.old] = None  # rename: old path disappears
 
@@ -203,8 +222,9 @@ class Analyzer:
                 lines.update(range(b.lo, b.hi + 1))
             else:
                 lines.update((b.lo - 1, b.lo))
-        ts, module = m.tests_for_lines(path, lines)
+        ts, module, groups = m.tests_for_lines(path, lines)
         res.tests |= ts
+        res.groups.extend(groups)
         res.notes.append(f"code:{path}:{len(ts)}{':module' if module else ''}")
 
     def _importers(self, path):
