@@ -102,6 +102,8 @@ class Result:
     notes: list = field(default_factory=list)
     import_break: list = field(default_factory=list)
     groups: list = field(default_factory=list)  # evidence sets for giant tests
+    edits: list = field(default_factory=list)  # (path, lines) edits inside function bodies
+    refinable: bool = True  # every edit is inside a function body (or a no-op)
 
 
 class Analyzer:
@@ -202,11 +204,14 @@ class Analyzer:
             if path.startswith("sqlglot/") and path.endswith(".py"):
                 self._sqlglot_py(path, fd, blocks, old, exists, res)
             elif path.startswith("tests/") and path.endswith(".py"):
+                res.refinable = False
                 self._test_py(path, fd, blocks, old, exists, res)
             else:
                 ts = set(m.opened.get(path, []))
                 if fd.old and fd.new and fd.old != fd.new:
                     ts |= set(m.opened.get(fd.new, []))
+                if ts or not exists:
+                    res.refinable = False
                 if not ts and not exists:
                     res.notes.append(f"new-file:{path}")
                 res.tests |= ts
@@ -216,6 +221,7 @@ class Analyzer:
     def _sqlglot_py(self, path, fd, blocks, old, exists, res):
         m = self.m
         if not exists or path not in m.files:
+            res.refinable = False
             # new module: nothing imports it at the pinned commit unless discovered
             # dynamically (entry points / dialect enumeration). Run those users.
             ts = set(m.opened.get(os.path.dirname(path) + "/__init__.py", []))
@@ -223,12 +229,14 @@ class Analyzer:
             res.notes.append(f"new-module:{path}:{len(ts)}")
             return
         if fd.new is None:  # deleted module
+            res.refinable = False
             res.import_break.append(path)
             res.tests |= self._importers(path)
             return
         stmts = m.files[path]["stmts"]
         semantic, broken = self._semantic_blocks(path, stmts, old, blocks)
         if broken:
+            res.refinable = False
             res.import_break.append(path)
             res.tests |= self._importers(path)
             res.notes.append(f"syntax:{path}")
@@ -243,6 +251,17 @@ class Analyzer:
             else:
                 lines.update((b.lo - 1, b.lo))
         ts, module, groups = m.tests_for_lines(path, lines)
+        units = m.files[path]["units"]
+        body_only = True
+        for ln in lines:
+            u = m.innermost(path, ln)
+            if u < 0 or ln < units[u][1]:
+                body_only = False  # class body / module level / signature
+                break
+        if body_only:
+            res.edits.append((path, sorted(lines)))
+        else:
+            res.refinable = False
         res.tests |= ts
         res.groups.extend(groups)
         res.notes.append(f"code:{path}:{len(ts)}{':module' if module else ''}")

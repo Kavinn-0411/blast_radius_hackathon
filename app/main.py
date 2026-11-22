@@ -75,6 +75,13 @@ def run(commits, tests) -> None:
     for t in tests:
         m.test_file_of[t["number"]] = (t["file"], t["id"])
     an = Analyzer(m, sorted(known))
+    try:
+        import reach
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "giant_lines.json")) as fh:
+            rch = reach.Reach(json.load(fh), m.files)
+    except Exception as e:
+        log(f"reach unavailable: {e!r}")
+        rch = None
 
     os.makedirs(verify.TMP, exist_ok=True)
     # the board's machine is likely slower than the one costs were measured on;
@@ -98,6 +105,12 @@ def run(commits, tests) -> None:
             log(f"{cid}: analysis failed {e!r}; selecting everything")
             emit(cid, known)
             continue
+        if rch is not None and res.refinable and res.edits:
+            # long tests that never reached an edited statement cannot be affected
+            drop = {t for t in res.tests if t in rch.cov and not rch.reached(t, res.edits)}
+            if drop:
+                res.tests -= drop
+                res.notes.append(f"unreached:{len(drop)}")
         kinds = {n.split(":", 1)[0] for n in res.notes}
         data_only = bool(kinds) and kinds <= {"data", "noop"}
         p = policy.make_plan(res, sec, ms, known, m.test_file_of, budget_left, data_only)
